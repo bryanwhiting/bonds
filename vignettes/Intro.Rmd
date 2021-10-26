@@ -1,0 +1,64 @@
+---
+title: "Intro"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Intro}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(bonds)
+```
+```{r run, execute=F}
+etl_all_files()
+```
+
+Set up SQL connection
+```{r}
+library(pool)
+db_path = here::here('data.db')
+# pool <- dbPool(RSQLite::SQLite(), db=db_path)
+con <- dbConnect(RSQLite::SQLite(), db=db_path)
+```
+
+```{r}
+dbGetQuery(pool, 'PRAGMA table_info(files)')
+dbGetQuery(pool, 'PRAGMA table_info(bonds)')
+dbGetQuery(pool, 'PRAGMA table_info(samples)')
+```
+
+
+```{sql, connection=con}
+select * 
+from files
+limit 10
+```
+
+## Parquet interfaces
+
+Read in all files (might be memory intensive):
+
+```{r}
+read_parquet_table('files')
+```
+```{r}
+df_bonds <- read_parquet_table('bonds')
+df_bonds %>%
+  head()
+```
+
+
+Read in ju
+
+```{r}
+read_parquet_table('files')
+```
+
