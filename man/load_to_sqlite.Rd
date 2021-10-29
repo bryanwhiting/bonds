@@ -4,7 +4,7 @@
 \alias{load_to_sqlite}
 \title{Loads the three data sets into a sqlite database}
 \usage{
-load_to_sqlite(data, db_path = here::here("data.db"), idx = NULL)
+load_to_sqlite(data, db = db_path, idx = NULL)
 }
 \arguments{
 \item{data}{List of dataframes}

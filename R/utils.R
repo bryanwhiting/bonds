@@ -1,6 +1,17 @@
+#' @export
 dir_output <- here::here("output")
+
+#' @export
 db_path <- here::here(dir_output, "data.db")
+
+#' @export
 dir_pqt <- here::here(dir_output, "pqt")
+
+#' @export
+dir_pqt_all <- here::here(dir_pqt, "all")
+
+#' @export
+dir_pqt_grpid <- here::here(dir_pqt, "grpid")
 
 #' Extracts integers from filenames
 #'
@@ -74,15 +85,21 @@ parse_and_clean_data <- function(df) {
     distinct() %>%
     mutate(start_date_time = lubridate::ymd_hms(start_date_time))
 
+
+  # save out a dataset ready for modeling by bond_group_id
+  df_bonds_with_samples_final <- df_bonds %>%
+    mutate(date_time = lubridate::ymd_hms(date_time)) %>%
+    unnest(trace_samples)
+
   return(
     list(
       files = df_file_final,
       bonds = df_bonds_final,
-      samples = df_samples_final
+      samples = df_samples_final,
+      bonds_with_samples = df_bonds_with_samples_final
     )
   )
 }
-
 
 #' Loads the three data sets into a sqlite database
 #'
@@ -153,6 +170,25 @@ add_column_if_doesnt_exist <- function(df, pool, tab) {
   }
 }
 
+#' Split data by bond_group_id
+#'
+#' splits bond sample data into partitions by
+#' bond_group_id
+#'
+#' @param data list with a dataframe called bonds_with_samples inside
+#'
+#' @return
+#' @export
+#'
+#' @examples
+prep_group_id_data <- function(data){
+  df_bws <- data$bonds_with_samples
+  # how to split a df into lists: https://stackoverflow.com/a/18527515
+  df_bws_split <- split(df_bws, f=df_bws$bond_group_id)
+  return(df_bws_split)
+}
+
+
 #' Write as parquet
 #'
 #' Creates individual tables for each section of json object
@@ -164,11 +200,11 @@ add_column_if_doesnt_exist <- function(df, pool, tab) {
 #' @export
 #'
 #' @examples
-save_as_parquet <- function(data, idx) {
+save_as_parquet <- function(data, dir_root, idx) {
   tabs <- names(data)
-  # Loop over tab names and save out as pqt/bonds/00001.parquet
+  # Loop over tab names and save out as pqt/bonds/part-00001.parquet
   purrr::map(tabs, ~ {
-    fp <- here::here(dir_pqt, ., glue("{str_pad(idx,5,pad=0)}.parquet"))
+    fp <- here::here(dir_root, ., glue("part-{str_pad(idx,5,pad=0)}.parquet"))
     fs::dir_create(path_dir(fp))
     arrow::write_parquet(data[[.]], fp)
   })
@@ -187,11 +223,36 @@ save_as_parquet <- function(data, idx) {
 etl_one_file <- function(idx) {
   # all steps (process all files)
   fp <- create_filename(idx = idx)
+
+  logger::log_info('Parsing JSON')
   df <- load_file_as_tibble(fp)
+
+  logger::log_info('Cleaning data')
   data <- parse_and_clean_data(df)
+
+  logger::log_info('Loading to sql')
+  tic()
   load_to_sqlite(data, idx = idx)
-  save_as_parquet(data, idx = idx)
+  toc()
+
+  # save as all
+  logger::log_info('Save as pqt all')
+  tic()
+  all <- data[c('files', 'bonds', 'samples')]
+  save_as_parquet(data=all, dir_root=dir_pqt_all, idx = idx)
+  toc()
+
+  # split into parquet file by group_id
+  logger::log_info('Save as pqt by group_id')
+  tic()
+  grpid <- data[c('bonds_with_samples')]
+  ls_grpid <- prep_group_id_data(grpid)
+  save_as_parquet(data = ls_grpid, dir_root=dir_pqt_grpid, idx = idx)
+  toc()
+
+  logger::log_info(glue('Finished file{idx}'))
 }
+
 
 
 
@@ -231,6 +292,24 @@ db_to_fst <- function(db_path = db_path) {
   ")
 }
 
+#' Read in multipart parquet
+#' https://stackoverflow.com/a/58450079
+#'
+#' @param file_list
+#'
+#' @return
+#' @export
+glob_parquets <- function(file_list){
+  df <- data.table::rbindlist(
+    lapply(
+      file_list,
+      function(x) arrow::read_parquet(x)
+    ),
+    fill = TRUE
+  )
+  return(df)
+}
+
 #' Read in a multipart parquet file using a given file range
 #'
 #' @param tab
@@ -241,30 +320,23 @@ db_to_fst <- function(db_path = db_path) {
 #'
 #' @examples
 #' read_parquet_table("files", range = 1:5)
-read_parquet_table <- function(tab, range = NULL) {
-  dir_pqt <- here::here(dir_pqt, tab)
-  file_list <- dir_ls(dir_pqt)
+load_pqt <- function(dir_root, tab, range = NULL) {
+  d <- here::here(dir_root, tab)
+  file_list <- dir_ls(d)
   if (!is.null(range)) {
     part_files <- str_pad(range, 5, pad = "0")
-    file_list <- glue("{dir_pqt}/{part_files}.parquet")
+    file_list <- glue("{d}/part-{part_files}.parquet")
   }
-  # read in multipart parquet
-  # https://stackoverflow.com/a/58450079
-  df <- data.table::rbindlist(
-    lapply(
-      file_list,
-      function(x) arrow::read_parquet(x)
-    ),
-    fill = TRUE
-  )
+
+  df <- glob_parquets(file_list)
   return(as_tibble(df))
 }
 
 # TODO: create automl tool?
-prep_for_ml <- function(db_path = db_path) {
-  pool <- dbPool(RSQLite::SQLite(), db = db_path)
-  dbGetQuery(
-    pool,
-    "select"
-  )
-}
+# prep_for_ml <- function(db_path = db_path) {
+#   pool <- dbPool(RSQLite::SQLite(), db = db_path)
+#   dbGetQuery(
+#     pool,
+#     "select"
+#   )
+# }

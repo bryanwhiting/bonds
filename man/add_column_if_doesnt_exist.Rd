@@ -5,12 +5,12 @@
 \title{Checks if every column in the dataset exists in the
 SQLITE table. If it doesn't, it adds one.}
 \usage{
-add_column_if_doesnt_exist(data, pool, tab)
+add_column_if_doesnt_exist(df, pool, tab)
 }
 \arguments{
-\item{data}{List of dataframes}
-
 \item{pool}{Connection}
+
+\item{data}{List of dataframes}
 
 \item{table}{}
 }

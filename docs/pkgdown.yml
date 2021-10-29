@@ -1,0 +1,10 @@
+pandoc: 2.14.0.3
+pkgdown: 1.6.1
+pkgdown_sha: ~
+articles:
+  Intro: Intro.html
+last_built: 2021-10-29T06:35Z
+urls:
+  reference: https://bryanwhiting.github.io/bonds/reference
+  article: https://bryanwhiting.github.io/bonds/articles
+

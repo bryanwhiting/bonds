@@ -1,8 +1,8 @@
 ---
-title: "Intro"
+title: "Overview"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Intro}
+  %\VignetteIndexEntry{Overview}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -14,27 +14,387 @@ knitr::opts_chunk$set(
 )
 ```
 
+## Problem statement
+
+> Assume that there is a data science team working on developing a classification algorithm that at a Bond Object level can predict `PULL_TEST_STATUS` based on the time-series data in the Sample Objects. It is currently a very time-consuming task for this team to access the data they need. These JSON files land in a single directory on a Network File Share (NFS) and there are tens of thousands of files generated per day. Thus, this team can only get data for a specific `BOND_GROUP_ID`, for example, by loading data for a particular time range into memory and then filtering. They are looking to you to help provide a new way to access this data in a schema which facilitates their modeling efforts.
+
+## Problem break down
+
+### BDD Scenario
+
+As a data engineer, I want to make it as easy as possible for the data science team to query data by timestamp for a given bond_group_id so they can predict the failure of pull_test_status given sample data and anticipate, identify, and eliminate failures.
+
+### Interpretation
+
+Inputs:
+
+- Time series data (very important for modeling)
+- Assume 100k json files per day (time/scale constraint) 
+  - About 1.5TB of data per day if we have ~15MB per file 
+  - About 1.15 files per second if $(100k/(24*60*60))$
+- JSON files in single directory
+
+Constraints:
+
+- Linux cluster (no cloud resources)
+- Access to shared file system
+
+Requirements:
+
+- Get all trace_samples for a bond_group_id
+- Dead simple to query data for modeling
+
+### Schema
+
+A few ideas come to mind for how we'll store the data: 
+
+- Use a ([star schema]( https://searchdatamanagement.techtarget.com/definition/star-schema) design)
+- Save out data in the way the users will query it (bond_group_id and samples)
+
+**Star Schema**: Since our data are nested, we can create dimension tables for files and fact tables for bonds and samples.
+
+```
+files_table
+- file_id
+- file_* (metadata)
+
+bonds_table 
+- file_id
+- bond_id
+- bond_* (metadata)
+
+samples_table:
+- (optional): file_id // optional bc each sample_id is unique to bond_id
+- bond_id
+- sample_id
+- sample_* (metadata)
+```
+
+Cons: Users would have to join the data to do their analysis. Joins can be messy (especially with time-series data).
+
+**Model-ready dataset**: Prepare it for modeling (flat tables):
+
+```
+samples_table:
+sample_id 
+bond_id
+bond_metadata* (replicated each row per sample_id)
+file_id
+file_metadata (replicated each row per bond_id)
+```
+
+Flat tables are easiest for doing machine learning. They're inefficient for storage, however.
+
+**Other ideas:**
+
+- Nested arrays (multidimensional fields within a table). This is too complicated for this assignment.
+- Snowflake schema: also too complex, but might be efficient for storage
+
+### Data Storage
+
+A few storage approaches come to mind:
+
+- Save in a database (sqlite)
+- Save as parquet files
+- Save as avro
+- Save as other data formats (R/Python native)
+
+**Pros/cons of database** 
+
+Pros: 
+
+* Database is easy to query with SQL.
+* Database can handle file writing concurrency.
+* Quick I/O.
+
+Cons: 
+
+* Database might have slower I/O than parquet
+* Problems querying terabytes of data on a daily basis. 
+* Would also have problems maintaining the size over time. We could design the database to be indexed on time and bond_group_id, but this doesn't guarantee it'll be fast to query. If users try to do joins against the database, we'd have to help optimize the queries. 
+* Less flexible if each json file has unique columns (benefits of json file format is that engineers can easily add/subtract key-value pairs. it's very flexible. But the database might not be so flexible)
+
+**Pros/cons of parquet files** 
+
+Pros: 
+
+* Individual file types are saved out. 
+* No collisions since you're just loading json files and converting them to parquet files. 
+* Users can easily load in the files that they want (e.g., you can name files in a way to make it easy to read by date), thus the I/O is incredibly fast since the users wouldn't have to load the data into memory first before filtering. 
+* Users can use any language they want to query (java, scala, python, pyspark, pandas, dask, R, RSpark). 
+
+Cons: 
+
+* Users might not be as familiar with parquet and we'd have to teach them its benefits (not hard to do!).
+
+**Pros/cons of avro**: similar to parquet, but more easily handles file systems which [change schema over time](http://avro.apache.org/docs/1.7.7/spec.html#Schema+Resolution). 
+
+**Pros/cons of language-native file systems**
+
+Pros: 
+
+* R has incredibly fast IO with `.Rda`, `.RDS` and `.fst` file types (see [post](https://data.nozav.org/post/2019-r-data-frame-benchmark/)). That, and the data is  efficiently stored if it's going to be used specifically by R users. 
+
+Cons: 
+
+* Users would be constrained to one language for I/O and would have to convert from R to python (or vice versa).
+
+## R Package
+
+### ETL the Data
+
+I've decided to design using a few different design approaches (reviewed below). I wrote an R package to handle the data processing. The `bonds` package has multiple
+functions to help with ETL.
+
 ```{r setup}
 library(bonds)
 ```
-```{r run, execute=F}
-etl_all_files()
-```
 
-Set up SQL connection
+I created a function `etl_all_files()` that does the ELT:
+
+1. reads the json
+2. cleans data
+3. loads it into a sqlite database 
+4. saves out two types of parquet files (which will be reviewed later). 
+
+Here are the logs for the output:
+
+```
+> etl_all_files()
+[1] 1
+INFO [2021-10-29 05:14:41] Parsing JSON
+INFO [2021-10-29 05:14:44] Cleaning data
+INFO [2021-10-29 05:14:45] Loading to sql
+0.812 sec elapsed
+INFO [2021-10-29 05:14:45] Save as pqt all
+0.359 sec elapsed
+INFO [2021-10-29 05:14:46] Save as pqt by group_id
+0.426 sec elapsed
+INFO [2021-10-29 05:14:46] Finished file1
+[1] 2
+INFO [2021-10-29 05:14:46] Parsing JSON
+INFO [2021-10-29 05:14:49] Cleaning data
+INFO [2021-10-29 05:14:49] Loading to sql
+INFO [2021-10-29 05:14:49] Updating [data.files] from file 2
+INFO [2021-10-29 05:14:49] Updating [data.bonds] from file 2
+INFO [2021-10-29 05:14:49] Updating [data.samples] from file 2
+0.5 sec elapsed
+INFO [2021-10-29 05:14:50] Save as pqt all
+0.2 sec elapsed
+INFO [2021-10-29 05:14:50] Save as pqt by group_id
+0.942 sec elapsed
+INFO [2021-10-29 05:14:51] Finished file2
+```
+<details><summary>Click for more logs</summary>
+```
+[1] 3
+INFO [2021-10-29 05:14:51] Parsing JSON
+INFO [2021-10-29 05:14:54] Cleaning data
+INFO [2021-10-29 05:14:54] Loading to sql
+INFO [2021-10-29 05:14:54] Updating [data.files] from file 3
+INFO [2021-10-29 05:14:54] Adding rework_trigger_msg AS TEXT to [data.bonds]
+INFO [2021-10-29 05:14:54] Updating [data.bonds] from file 3
+INFO [2021-10-29 05:14:54] Updating [data.samples] from file 3
+0.522 sec elapsed
+INFO [2021-10-29 05:14:55] Save as pqt all
+0.191 sec elapsed
+INFO [2021-10-29 05:14:55] Save as pqt by group_id
+0.469 sec elapsed
+INFO [2021-10-29 05:14:55] Finished file3
+[1] 4
+INFO [2021-10-29 05:14:55] Parsing JSON
+INFO [2021-10-29 05:14:59] Cleaning data
+INFO [2021-10-29 05:14:59] Loading to sql
+INFO [2021-10-29 05:14:59] Updating [data.files] from file 4
+INFO [2021-10-29 05:14:59] Updating [data.bonds] from file 4
+INFO [2021-10-29 05:14:59] Updating [data.samples] from file 4
+0.659 sec elapsed
+INFO [2021-10-29 05:15:00] Save as pqt all
+0.26 sec elapsed
+INFO [2021-10-29 05:15:00] Save as pqt by group_id
+0.536 sec elapsed
+INFO [2021-10-29 05:15:01] Finished file4
+[1] 5
+INFO [2021-10-29 05:15:01] Parsing JSON
+INFO [2021-10-29 05:15:04] Cleaning data
+INFO [2021-10-29 05:15:04] Loading to sql
+INFO [2021-10-29 05:15:04] Updating [data.files] from file 5
+INFO [2021-10-29 05:15:04] Updating [data.bonds] from file 5
+INFO [2021-10-29 05:15:04] Updating [data.samples] from file 5
+0.385 sec elapsed
+INFO [2021-10-29 05:15:04] Save as pqt all
+0.123 sec elapsed
+INFO [2021-10-29 05:15:04] Save as pqt by group_id
+0.572 sec elapsed
+INFO [2021-10-29 05:15:05] Finished file5
+[1] 6
+INFO [2021-10-29 05:15:05] Parsing JSON
+INFO [2021-10-29 05:15:07] Cleaning data
+INFO [2021-10-29 05:15:08] Loading to sql
+INFO [2021-10-29 05:15:08] Updating [data.files] from file 6
+INFO [2021-10-29 05:15:08] Updating [data.bonds] from file 6
+INFO [2021-10-29 05:15:08] Updating [data.samples] from file 6
+0.489 sec elapsed
+INFO [2021-10-29 05:15:08] Save as pqt all
+0.128 sec elapsed
+INFO [2021-10-29 05:15:09] Save as pqt by group_id
+0.412 sec elapsed
+INFO [2021-10-29 05:15:09] Finished file6
+[1] 7
+INFO [2021-10-29 05:15:09] Parsing JSON
+INFO [2021-10-29 05:15:11] Cleaning data
+INFO [2021-10-29 05:15:11] Loading to sql
+INFO [2021-10-29 05:15:11] Updating [data.files] from file 7
+INFO [2021-10-29 05:15:11] Updating [data.bonds] from file 7
+INFO [2021-10-29 05:15:11] Updating [data.samples] from file 7
+0.355 sec elapsed
+INFO [2021-10-29 05:15:12] Save as pqt all
+0.098 sec elapsed
+INFO [2021-10-29 05:15:12] Save as pqt by group_id
+0.411 sec elapsed
+INFO [2021-10-29 05:15:12] Finished file7
+[1] 8
+INFO [2021-10-29 05:15:12] Parsing JSON
+INFO [2021-10-29 05:15:15] Cleaning data
+INFO [2021-10-29 05:15:15] Loading to sql
+INFO [2021-10-29 05:15:15] Updating [data.files] from file 8
+INFO [2021-10-29 05:15:15] Updating [data.bonds] from file 8
+INFO [2021-10-29 05:15:15] Updating [data.samples] from file 8
+0.367 sec elapsed
+INFO [2021-10-29 05:15:16] Save as pqt all
+0.107 sec elapsed
+INFO [2021-10-29 05:15:16] Save as pqt by group_id
+0.47 sec elapsed
+INFO [2021-10-29 05:15:16] Finished file8
+[1] 9
+INFO [2021-10-29 05:15:16] Parsing JSON
+INFO [2021-10-29 05:15:20] Cleaning data
+INFO [2021-10-29 05:15:20] Loading to sql
+INFO [2021-10-29 05:15:20] Updating [data.files] from file 9
+INFO [2021-10-29 05:15:20] Updating [data.bonds] from file 9
+INFO [2021-10-29 05:15:20] Updating [data.samples] from file 9
+0.462 sec elapsed
+INFO [2021-10-29 05:15:20] Save as pqt all
+0.206 sec elapsed
+INFO [2021-10-29 05:15:21] Save as pqt by group_id
+0.501 sec elapsed
+INFO [2021-10-29 05:15:21] Finished file9
+[1] 10
+INFO [2021-10-29 05:15:21] Parsing JSON
+INFO [2021-10-29 05:15:24] Cleaning data
+INFO [2021-10-29 05:15:24] Loading to sql
+INFO [2021-10-29 05:15:24] Updating [data.files] from file 10
+INFO [2021-10-29 05:15:24] Updating [data.bonds] from file 10
+INFO [2021-10-29 05:15:24] Updating [data.samples] from file 10
+0.52 sec elapsed
+INFO [2021-10-29 05:15:25] Save as pqt all
+0.21 sec elapsed
+INFO [2021-10-29 05:15:25] Save as pqt by group_id
+0.469 sec elapsed
+INFO [2021-10-29 05:15:25] Finished file10
+[1] 11
+INFO [2021-10-29 05:15:25] Parsing JSON
+INFO [2021-10-29 05:15:28] Cleaning data
+INFO [2021-10-29 05:15:28] Loading to sql
+INFO [2021-10-29 05:15:28] Updating [data.files] from file 11
+INFO [2021-10-29 05:15:28] Updating [data.bonds] from file 11
+INFO [2021-10-29 05:15:28] Updating [data.samples] from file 11
+0.409 sec elapsed
+INFO [2021-10-29 05:15:29] Save as pqt all
+0.21 sec elapsed
+INFO [2021-10-29 05:15:29] Save as pqt by group_id
+0.571 sec elapsed
+INFO [2021-10-29 05:15:30] Finished file11
+[1] 12
+INFO [2021-10-29 05:15:30] Parsing JSON
+INFO [2021-10-29 05:15:32] Cleaning data
+INFO [2021-10-29 05:15:32] Loading to sql
+INFO [2021-10-29 05:15:32] Updating [data.files] from file 12
+INFO [2021-10-29 05:15:32] Updating [data.bonds] from file 12
+INFO [2021-10-29 05:15:32] Updating [data.samples] from file 12
+0.328 sec elapsed
+INFO [2021-10-29 05:15:33] Save as pqt all
+0.099 sec elapsed
+INFO [2021-10-29 05:15:33] Save as pqt by group_id
+0.447 sec elapsed
+INFO [2021-10-29 05:15:33] Finished file12
+[1] 13
+INFO [2021-10-29 05:15:33] Parsing JSON
+INFO [2021-10-29 05:15:37] Cleaning data
+INFO [2021-10-29 05:15:37] Loading to sql
+INFO [2021-10-29 05:15:37] Updating [data.files] from file 13
+INFO [2021-10-29 05:15:37] Updating [data.bonds] from file 13
+INFO [2021-10-29 05:15:37] Updating [data.samples] from file 13
+0.476 sec elapsed
+INFO [2021-10-29 05:15:37] Save as pqt all
+0.144 sec elapsed
+INFO [2021-10-29 05:15:37] Save as pqt by group_id
+0.361 sec elapsed
+INFO [2021-10-29 05:15:38] Finished file13
+[1] 14
+INFO [2021-10-29 05:15:38] Parsing JSON
+INFO [2021-10-29 05:15:41] Cleaning data
+INFO [2021-10-29 05:15:42] Loading to sql
+INFO [2021-10-29 05:15:42] Updating [data.files] from file 14
+INFO [2021-10-29 05:15:42] Updating [data.bonds] from file 14
+INFO [2021-10-29 05:15:42] Updating [data.samples] from file 14
+0.539 sec elapsed
+INFO [2021-10-29 05:15:42] Save as pqt all
+0.114 sec elapsed
+INFO [2021-10-29 05:15:42] Save as pqt by group_id
+0.69 sec elapsed
+INFO [2021-10-29 05:15:43] Finished file14
+[1] 15
+INFO [2021-10-29 05:15:43] Parsing JSON
+INFO [2021-10-29 05:15:46] Cleaning data
+INFO [2021-10-29 05:15:46] Loading to sql
+INFO [2021-10-29 05:15:46] Updating [data.files] from file 15
+INFO [2021-10-29 05:15:46] Updating [data.bonds] from file 15
+INFO [2021-10-29 05:15:46] Updating [data.samples] from file 15
+0.374 sec elapsed
+INFO [2021-10-29 05:15:47] Save as pqt all
+0.113 sec elapsed
+INFO [2021-10-29 05:15:47] Save as pqt by group_id
+0.399 sec elapsed
+INFO [2021-10-29 05:15:47] Finished file15
+```
+</details>
+
+### Conclusions
+
+`sqlite` is 3x slower than writing out by parquet.
+Saving out parquet files by group_id is 3x slower than doing the star
+schema approach.
+
+## Interact with Schema
+
+There are two schemas:
+
+1. star schema of a `files`, `bonds`, and `samples` table. This is saved out as
+both sqlite and parquet
+2. a model-ready dataset, where `bonds` is joined to `samples`
+
+### Read in output
+
+Set up SQL connection for star schema:
+
 ```{r}
-library(pool)
-db_path = here::here('data.db')
+db_path = here::here('output/data.db')
 # pool <- dbPool(RSQLite::SQLite(), db=db_path)
-con <- dbConnect(RSQLite::SQLite(), db=db_path)
+con <- DBI::dbConnect(RSQLite::SQLite(), db=db_path)
 ```
+
+Explore schema of tables:
 
 ```{r}
-dbGetQuery(pool, 'PRAGMA table_info(files)')
-dbGetQuery(pool, 'PRAGMA table_info(bonds)')
-dbGetQuery(pool, 'PRAGMA table_info(samples)')
+dbGetQuery(con, 'PRAGMA table_info(files)')
+
+dbGetQuery(con, 'PRAGMA table_info(bonds)')
+
+dbGetQuery(con, 'PRAGMA table_info(samples)')
 ```
 
+You can write SQL to read the data directly:
 
 ```{sql, connection=con}
 select * 
@@ -42,23 +402,380 @@ from files
 limit 10
 ```
 
-## Parquet interfaces
+### Parquet Star Schema
 
-Read in all files (might be memory intensive):
+I saved the star schema out as a parquet files, one parquet file per file_id. There are 15 files per `bonds/`, `files/` and `samples/` folders.
 
 ```{r}
-read_parquet_table('files')
+dir_output <- "/home/rstudio/tesla/bonds/output"
+dir_pqt <- here::here(dir_output, "pqt")
+dir_pqt_all <- here::here(dir_pqt, "all")
+dir_pqt_grpid <- here::here(dir_pqt, "grpid")
+fs::dir_ls(dir_pqt_all)
 ```
+
+Inspecting the `files` folder:
+
 ```{r}
-df_bonds <- read_parquet_table('bonds')
+fs::dir_ls(fs::path(dir_pqt_all, 'files'))
+```
+
+I wrote a function to read the parquet files:
+
+```{r}
+load_pqt(dir_pqt_all, 'files')
+```
+
+I also wrote an interface to allow the readers to filter the parquet files based on the file name. If I rename the parquet files based on the datetime of the file_id, this would enable the data scientists to filter to the time range very easily.
+
+```{r}
+load_pqt(dir_pqt_all, 'files', range=4:7)
+```
+
+Read in the bonds table:
+
+```{r}
+df_bonds <- load_pqt(dir_pqt_all, 'bonds')
 df_bonds %>%
   head()
 ```
 
+### Parquet, save out by group_id with model-ready data
 
-Read in ju
+If the DS team cares to model a specific group_id with samples, I partitioned the files by group_id in `output/pqt/grpid/<group_id>`:
 
 ```{r}
-read_parquet_table('files')
+fs::dir_ls(dir_pqt_grpid)
 ```
 
+For example, you can see how some file_ids contained a `group_id` and others didn't:
+
+```{r}
+fs::dir_ls(dir_pqt_grpid, recurse=T) %>%
+  head(10)
+```
+
+The data scientists can easily load in all the samples for a bond_id. This table replicates the metadata for each bond_id across each trace sample. This makes the data easily to model.
+
+```{r}
+load_pqt(dir_root=dir_pqt_grpid, tab='12mil_CP') %>%
+  head(20) 
+```
+
+<details><summary>Click for more data exploration</summary>
+The following snippets explore the star schema data:
+
+```{r}
+df_bonds <- load_pqt(dir_root = dir_pqt_all, 'bonds')
+df_samples <- load_pqt(dir_root = dir_pqt_all, 'samples')
+
+# 7 bond_group_ids
+df_bonds %>%
+  summarize(n_distinct(bond_group_id)) 
+
+# sample: need to up/downsample
+# filter to the failed samples, save those in one file
+# extreme class imbalance
+df_bonds %>%
+  count(pull_test_status)
+
+# there are 3548 bonds
+df_bonds %>%
+  summarize(n_distinct(bond_id))
+
+# there are up to 4600 samples per bond_id.
+df_samples %>%
+  count(bond_id, sort=T)
+
+# what's the relationship between bonds and samples?
+# multiple bond_ids
+df_bonds %>% 
+  group_by(bond_group_id) %>% 
+  summarize(n_distinct(bond_id))
+
+# what's the primary key of the bonds table?
+# file_id, bond_id
+count(df_bonds)
+df_bonds %>%
+  distinct(file_id, bond_id) %>%
+  count()
+
+# what is the primary key of bonds table without file_id?
+# bond_id, bond_group_id, and date_time make a PK
+df_bonds %>%
+  distinct(bond_id, bond_group_id, date_time) %>%
+  count()
+```
+
+</details>
+
+## Build an ML model
+
+This section shows how a DS could model the data using the schema
+I've provided.
+
+There are two simple ways to model the data:
+
+- One model with bond_group_id as a feature
+- Multiple models (one per bond_group_id) - seems like what they're doing is
+reading in data and then filtering for just a bond object. (I made this easier
+by saving out parquet files for that particular bond object)
+
+Upon inspecting the data, it appears there's severe class imbalance (only one `Fail` per 13321 bonds). This data would be nearly impossible to model as is, so either we'd need to gather more data or would have to do up-sample the `samples` for the Fail status, downsample the `samples` for the Pass status, or some mixture of both.
+
+Since only `Ni-CP-Rev6-300(12)` has a `Fail` test status, we'll build a model on that group_id.
+
+```{r}
+df_bonds %>%
+  filter(pull_test_status == 'Fail') %>%
+  pull(bond_group_id)
+```
+
+### Load in model data
+
+Load data:
+
+```{r}
+df_ni <- load_pqt(dir_root = dir_pqt_grpid, tab='Ni-CP-Rev6-300(12)')
+```
+
+There are 189 trace samples with label `pull_test_status=Fail`. 
+
+```{r}
+df_ni %>%
+  group_by(pull_test_status) %>%
+  count()
+```
+
+### Model data
+
+I perform classification with [tidymodels](https://www.kirenz.com/post/2021-02-17-r-classification-tidymodels/), comparing both logistic regression (glm) with decision trees (xgboost). I
+query only a few numeric variables to keep things simple:
+
+```{r}
+library(tidymodels)
+library(xgboost)
+
+# Convert pull_test_status to be 0-1
+df_model <- df_ni %>%
+  mutate(
+    pull_test_status = as.factor(pull_test_status)
+    ) %>%
+  select(
+    pull_test_status,
+    zone_number,
+    wire_number,
+    DRIV,
+    PHAS,
+    VOLT)
+
+# explore distribution of the target variable
+with(df_model, table(pull_test_status))
+
+set.seed(100)
+# Put 3/4 of the data into the training set 
+data_split <- initial_split(df_model, 
+                           prop = .7, 
+                           strata = pull_test_status)
+
+# Create dataframes for the two sets:
+train_data <- training(data_split) 
+test_data <- testing(data_split)
+
+# specify target variable and training data
+# Downsample the data: https://themis.tidymodels.org/reference/step_downsample.html
+# recipes are for how data will be modeled and processed
+y_recipe <- recipe(pull_test_status ~ ., data = train_data) %>%
+  themis::step_downsample(pull_test_status, under_ratio = 1)
+
+# ensure downsampling is done right: this proves i sampled
+# a small number of Pass variables
+y_recipe %>%
+  prep(training = train_data, retain = TRUE) %>%
+  bake(new_data = NULL) %>%
+  with(., table(pull_test_status))
+
+# Specify model types
+mod_glm <- logistic_reg() %>%
+  set_engine('glm') %>%
+  set_mode('classification')
+
+# fit a model with downsampeld data
+downsampled_data <- y_recipe %>%
+  prep(training = train_data, retain=T) %>%
+  bake(new_data=NULL)
+
+mod_glm %>%
+  fit(pull_test_status ~ ., data=downsampled_data) 
+```
+
+Compare GLM to XGB:
+
+```{r}
+# Specify model types
+mod_glm <- logistic_reg() %>%
+  set_engine('glm') %>%
+  set_mode('classification')
+
+mod_xgb <- boost_tree() %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification") 
+
+# Create the workflows
+wflow_glm <- workflow() %>%
+  add_recipe(y_recipe) %>%
+  add_model(mod_glm)
+
+wflow_xgb <- workflow() %>%
+  add_recipe(y_recipe) %>%
+  add_model(mod_xgb)
+
+# Define cross-validation
+cv_folds <- vfold_cv(train_data, v = 5, strata = pull_test_status) 
+
+# Model the data, saving out the resutls
+results_glm <- 
+  wflow_glm %>%
+  fit_resamples(
+      resamples = cv_folds, 
+      metrics = metric_set(
+        recall, precision, f_meas, 
+        accuracy, kap,
+        roc_auc, sens, spec),
+      control = control_resamples(
+        save_pred = TRUE)
+      ) 
+# results_glm$.notes %>% as.character()
+
+results_xgb <- wflow_xgb %>%
+  fit_resamples(
+      resamples = cv_folds, 
+      metrics = metric_set(
+        recall, precision, f_meas, 
+        accuracy, kap,
+        roc_auc, sens, spec),
+      control = control_resamples(
+        save_pred = TRUE)
+      ) 
+# results_xgb$.notes %>% as.character()
+```
+
+GLM/XGBoost results - both models seem comparable, but seem suspiciously good:
+
+```{r}
+results_glm %>%
+  collect_metrics()
+
+results_xgb %>%
+  collect_metrics()
+```
+
+Assess predictions - we notice a lot of overfitting in the model. There's like a single feature driving everything (sign of feature leakage):
+
+```{r}
+preds_glm <- results_glm %>%
+  collect_predictions()
+
+preds_xgb <- results_xgb %>%
+  collect_predictions()
+
+preds_glm %>%
+  conf_mat(pull_test_status, .pred_class)
+
+# GBM predicts 100% of the failed classes (likely overfit)
+preds_xgb %>%
+  conf_mat(pull_test_status, .pred_class)
+
+# Roc Curves is upside down (likely because of some bug with how
+# the target variable is labeled)
+preds_glm %>%
+  group_by(id) %>%
+  roc_curve(pull_test_status, .pred_Pass) %>%
+  autoplot()
+
+# ROC curve
+preds_xgb %>%
+  group_by(id) %>%
+  roc_curve(pull_test_status, .pred_Pass) %>%
+  autoplot()
+```
+
+Let's see what features come up as important when we train on the full
+data and predict on a test set.
+
+```{r}
+last_fit_xgb <- last_fit(wflow_xgb, 
+                        split = data_split,
+                        metrics = metric_set(
+                          recall, precision, f_meas, 
+                          accuracy, kap,
+                          roc_auc, sens, spec)
+                        )
+
+# Prediction metrics look good
+last_fit_xgb %>%
+  collect_metrics()
+
+# Explore 
+last_fit_xgb %>%
+  collect_predictions() %>%
+  conf_mat(pull_test_status, .pred_class)
+
+# Explore feature importance
+library(vip)
+last_fit_xgb %>% 
+  pluck(".workflow", 1) %>%   
+  extract_fit_parsnip() %>% 
+  vip(num_features = 20)
+```
+
+Volt is the top predictor. There's likely something about volt and wire number that's driving "perfect" predictions. Let's look at the distribution of VOLT compared to the target variable.
+
+```{r}
+# downsampled data is the train data
+downsampled_data %>%
+  group_by(pull_test_status) %>%
+  skimr::skim()
+
+ggplot(downsampled_data, aes(x = VOLT, y = pull_test_status)) + 
+  geom_point()
+
+# wire number is driving the prediction
+ggplot(downsampled_data, 
+       aes(x = wire_number, y = pull_test_status)) + 
+  geom_point(alpha = .1)
+
+ggplot(downsampled_data, 
+       aes(x = wire_number, y = VOLT, color=pull_test_status)) + 
+  geom_point(alpha = .1)
+
+with(downsampled_data, table(pull_test_status, wire_number))
+downsampled_data %>%
+  group_by(pull_test_status, VOLT) %>%
+  count() %>%
+  arrange(desc(VOLT)) %>%
+  pivot_wider(names_from=pull_test_status, values_from=n) 
+```
+
+Wire number 72 seems to be the only place where there are failures, where VOLT is in a range between 112 and 116.
+
+### Conclusion
+
+We built a model that has perfect recall (no false negatives) but poor precision
+(a lot of false positives).
+
+## Next Steps for Data Model
+
+Ideas:
+
+- Since there's such extreme class imbalance, I may consider partitioning the data
+by pass/fail. This would make it easier to access the failed samples and study
+them more closely.
+- Time series modeling: feature engineering across time.
+
+Future enhancements:
+
+- Parallelize the data processing. I tried doing this with the sqlite database,
+but was having connection issues. Paaralellizing the parquet write out would 
+not have been an issue.
+- Since the file_ids aren't chronological, we can update the parquet naming convention to be chronological using the start_date_time in the file_id. E.g., `data/pqt/12mil_CP/part-20211020_152030-00001.parquet`. This would allow the DS team to easily choose dates/times and read in that data. (I'd create a function similar to the `range` functionality, but filters parquet files between two dates.)

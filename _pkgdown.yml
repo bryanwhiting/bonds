@@ -1,0 +1,8 @@
+url: https://bryanwhiting.github.io/bonds
+
+# home:
+  # strip_header: true
+
+template:
+  params:
+    bootswatch: cerulean
