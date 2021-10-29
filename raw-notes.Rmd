@@ -1,0 +1,378 @@
+---
+title: "Querying using SQL and R"
+date: "`r Sys.Date()`"
+author: Bryan Whiting
+output:
+  rmdformats::downcute:
+  self_contained: true
+thumbnails: true
+lightbox: true
+gallery: false
+highlight: tango
+code_folding: show
+df_print: paged
+---
+  
+  <!-- README.md is generated from README.Rmd. Please edit that file -->
+  
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  message=F,
+  comment = "#  "
+)
+```
+
+TODO: principles of database design
+
+- Never read in JSON data before.
+
+- Speed test - how quickly can I ELT?
+- Unit test cleaning
+- 
+
+Inputs:
+- 50,000 files per day (scale)
+
+Constraints:
+- Cluster of linux servers
+
+Output
+- A schema to facilitate modeling
+- Data organized in an ML-friendly way
+- a model
+
+Solution
+- ETL
+- Parallelized
+- Batching the sample
+- 
+
+
+1. What do the data look like?
+
+- Machine learning is easiest to do with a flat table
+- I want to minimize data replication (e.g., I don't want to store a flat table)
+- I want to set up the dataset so it's very easy to query and join.
+
+Schema:
+- 
+
+1. Approach: 
+
+- Combine all files in memory and then load
+- Load one at a time
+- Load in parallel
+
+2. How should I process the data? (R/Python/)
+
+- [Pandas]
+- R: using [jsonlite](https://themockup.blog/posts/2020-05-22-parsing-json-in-r-with-jsonlite/) or [tidyjson](https://github.com/sailthru/tidyjson) packages
+- [Databricks spark](https://docs.databricks.com/data/data-sources/read-json.html)
+- [Spark json](https://spark.apache.org/docs/latest/sql-data-sources-json.html)
+- [sparklyr](https://spark.rstudio.com/reference/stream_read_json.html)
+- [dask json](https://docs.dask.org/en/latest/generated/dask.dataframe.read_json.html)
+
+Other solutions:
+  - Looked at [sqlite json](https://www.sqlite.org/json1.html) improter
+  - Looked at [airbyte](https://airbyte.io/etl-tools/airflow-alternative-airbyte) and considered
+    building an airbyte [connector](https://airbyte.io/connector-development-kit)?
+
+After considering the above, and playing around with a few common imports,
+I might try dask + prefect.
+
+
+
+To keep things simple, I chose to use R because I'm fastest with it.
+
+3. Workflow manager
+- [Prefect](https://www.prefect.io/)
+- [Airflow](https://airflow.apache.org/)
+- [Airbyte vs. airflow](https://airbyte.io/etl-tools/airflow-alternative-airbyte)
+
+- use airflow + R or prefect + dask
+
+4. Machine learning: 
+- In-SQL: [mindsdb](https://mindsdb.com/)
+
+5. 
+
+```{r}
+library(jsonlite)
+library(tidyjson)
+library(tidyverse)
+data = "../data/data-challenge/data/example.json"
+jsonlite::fromJSON(data) %>%
+  # jsonlite::prettify()
+  glimpse()
+tidyjson::as.tbl_json(data) %>%
+  gather_array()
+
+data2 = "../data/data-challenge/data/interconnect_json/file_1.json"
+x <- fromJSON(data2)
+
+# map over each bond_id
+# get the first
+x %>%
+  purrr::pluck('BONDS', "BOND_ID") %>% 
+  length()
+
+x2 <- read_json(data2) 
+```
+
+`pluck` will extract the first element.
+
+1. Get one element of bond
+2. Map trace_samples to each bond_id. reshape trace_samples long
+3. save trace_samples into sqlite db
+4. save tr
+
+```{r}
+# 16 bonds
+x %>%
+  purrr::pluck('BONDS') %>% 
+  length()
+
+x %>%
+  purrr::pluck('BONDS', 2)
+  # View()
+x$BONDS[1]
+
+z <- x %>%
+  as_tibble() %>%
+  as_tibble()
+
+y <- as_tibble(x)
+y %>% 
+  pluck('BONDS') %>%
+  pluck('TRACE_SAMPLES', 1)
+
+bonds <- pluck(y, 'BONDS')
+length(bonds$TRACE_SAMPLES)
+bonds$TRACE_SAMPLES[[1]] %>% dim()
+bonds$TRACE_SAMPLES[[1]] %>% dim()
+bonds$BOND_ID 
+bonds$TRACE_SAMPLES
+bonds %>% pluck('TRACE_SAMPLES', 1) 
+
+bonds[1,]
+
+bonds %>%
+  as.tbl_json() %>%
+  gather_array('TRACE_SAMPLES')
+  
+head(bonds, 1)$TRACE_SAMPLES[2]
+dim(bonds)
+
+
+b2 <- bonds %>%
+  mutate(trace_samples2 = as.data.frame(TRACE_SAMPLES))
+
+
+head(bonds, 1)$TRACE_SAMPLES 
+
+row1 <- pluck(bonds, 'TRACE_SAMPLES', 1)
+row1$bond_id = bonds$BOND_ID[1]
+
+# Load into SQLITE
+
+library(DBI)
+con <- dbConnect(RSQLite::SQLite(), db=here::here('data.db'))
+dbWriteTable(conn=con, name='trace_samples', row1)
+dbFetch(dbSendQuery(con, "SELECT * FROM trace_samples"))
+```
+
+What's happening:
+- When I read in data, it creates a dataframe, one row per BOND_ID.
+- The trace samples are converted into a dataframe with each sample as a row
+
+todo: 
+- create a table they can easily join
+
+
+Problem with pandas:
+
+* Can read json easily, but doesn't give you nested dataframes. So the BONDS
+object would be just another JSON object. and TRACE_SAMPLES would be another.
+I'd like to work with a nested dataframe to keep things easy to manipulate and cross-join.
+* To get pandas to work, I'd have to 1. create some identifier in 
+
+```{python}
+import pandas as pd
+data = "../data/data-challenge/data/interconnect_json/file_1.json"
+df_pd = pd.read_json(data)
+df_bonds = pd.DataFrame(df_pd.BONDS.values.tolist())
+df_traces = pd.DataFrame(df_bonds.TRACE_SAMPLES.values.tolist())
+```
+
+Dask is really neat beacuse it can scale pandas lazily. But it's
+a bit of a pain to debug/inspect and last I used it (2 years ago), it can fail
+unexpectedly if partitioned datasets are missing certain values. Not sure if that
+bug has been resolved. So I don't want to try that for this task.
+
+Dask also works great with `prefect`, which is powered by dask. So it'd be a great
+workflow management option.
+
+```{python}
+import dask.dataframe as dd
+df_dask = dd.read_json(data2)
+df_dask.BONDS.head()
+```
+
+
+
+trace samples is nested under bond. bond is nested under file.
+
+Simple schema: 
+
+bond_id | bond_metadata
+
+pk between trace_samples_id and bond_id
+trace_samples_id | bond_id | trace_metadata
+
+
+Comparison on multiple IO formats:
+* https://data.nozav.org/post/2019-r-data-frame-benchmark/ 
+* fst package: https://www.fstpackage.org/
+
+
+* parquet: allows for multi-part
+```{r}
+
+# Option 1: save out as RDA (with unnesting)
+# Option 2: save out separate tables (unnesting then saving)
+# Option 3: use map
+
+# check speeds
+# output
+# assumptions: files are named _1 to _999999 (not timestamped or anything)
+library(here)
+library(glue)
+library(fs)
+library(stringr)
+list_files <- function(){
+  
+}
+files <- #
+  dir_ls("../data/data-challenge/data/interconnect_json/") %>%
+  basename() %>%
+  str_replace('file_(.*)\\.json', '\\1')
+
+idx = 1
+json_file = glue("../data/data-challenge/data/interconnect_json/file_{idx}.json")
+raw_data <- fromJSON(json_file) %>%
+  as_tibble()
+
+output_dir <- here::here('schema')
+fs::dir_create(output_dir)
+raw_data %>%
+  write_rds(file = here(output_dir, glue('file_{idx}')))
+  
+  
+
+# three tables: files, bonds, samples
+# Iterate over bonds - give each bond the file_id
+# Iterate over trace_samples, give each sample the bond_id
+# Map over files, bonds, samples (furrr)
+# Clean the data (cast to dates, booleans, enums)
+# Query the data (using joins)
+# Build a model from the data
+
+
+  
+
+bonds <- pluck(x, 'BONDS')
+bonds %>%
+  # pull(TRACE_SAMPLES) %>%
+  # head()
+  hoist(.col=TRACE_SAMPLES, .name_repair=T) %>%
+  # mutate(x = map(TRACE_SAMPLES, ~ as_tibble(.`[1`))) %>%
+  View()
+
+bonds %>%
+  unnest(TRACE_SAMPLES) %>%
+  class()
+
+map(bonds$TRACE_SAMPLES, as_tibble) %>%
+  View()
+View(bonds$TRACE_SAMPLES)
+
+length(bonds$TRACE_SAMPLES)
+as_tibble(bonds$TRACE_SAMPLES, .name_repair = 'universal')
+class(bonds$TRACE_SAMPLES[[1]])
+
+
+
+map(bonds$TRACE_SAMPLES, as_tibble)
+
+View(as_tibble(bonds$TRACE_SAMPLES))
+y <- bonds %>%
+  nest(data = TRACE_SAMPLES)
+y %>%
+  select(data) %>%
+  unnest(data) %>%
+  unnest(TRACE_SAMPLES) %>%
+  View()
+
+apply(bonds, 2, class)
+class(bonds)
+row1 <- pluck(bonds, 'TRACE_SAMPLES', 1)
+row2 <- pluck(bonds, 'TRACE_SAMPLES', 2)
+row1$bond_id = bonds$BOND_ID[1]
+row2$bond_id = bonds$BOND_ID[2]
+
+# Load into SQLITE
+
+library(DBI)
+con <- dbConnect(RSQLite::SQLite(), db=here::here('data.db'))
+# Initialize the schema
+# dbCreateTable(conn=con, name='samples', fields=colnames(row1))
+dbWriteTable(conn=con, name='samples', row1)
+dbAppendTable(conn=con, name='samples', row2)
+# dbFetch(dbSendQuery(con, "SELECT * FROM trace_samples"))
+dbDisconnect(con)
+```
+
+
+
+Questions: what if the json file was nested 10-20 levels, how might I scale
+this approach?
+- loop the nesting, identifying an id in the parent and connect with child
+
+
+DESIGN PRINCIPLES:
+- Star schema: https://searchdatamanagement.techtarget.com/definition/star-schema.
+Avoid redundancy
+
+Option 1:
+- Save in a relational database. 
+- Assuming 50K files per day, this database would be 750GB per day (15MB per file)
+- Index on date?
+
+Option 2: 
+- Save as parquet
+
+Option 3:
+- Save as RDS (memory efficient - half the storage)
+
+
+BUGS SOLVED:
+- had trouble when file 3 had a column in "bonds" that files 1 and 2 didn't have.
+Found the [`pool`](https://stackoverflow.com/questions/50893302/create-variable-in-database-using-alter-table-and-update) package solved my issue of being able 
+to add new columns to an existing SQLITE TABLE. That way, I don't have
+to scan every file.
+- never used parquet in R before. Didn't know how to read it in. Found [this](https://stackoverflow.com/a/58450079).
+
+Benefits:
+- Reduced file size from 200MB (raw json) to 100.9MB (data.db)
+- Saving to parquet reduces filesize to 9.6Mb
+
+TODO:
+- Logging
+- Loop all files
+  - TODO: one column is in file X but not in other files. check to make sure file is not in the dataframe and do an ALTER TABLE
+- parallelize file looping
+- Save out to schema
+- query to test
+- categorically encode variables (save space)
+- check for outliers

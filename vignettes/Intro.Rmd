@@ -773,9 +773,47 @@ by pass/fail. This would make it easier to access the failed samples and study
 them more closely.
 - Time series modeling: feature engineering across time.
 
-Future enhancements:
+### Future enhancements:
 
 - Parallelize the data processing. I tried doing this with the sqlite database,
 but was having connection issues. Paaralellizing the parquet write out would 
 not have been an issue.
 - Since the file_ids aren't chronological, we can update the parquet naming convention to be chronological using the start_date_time in the file_id. E.g., `data/pqt/12mil_CP/part-20211020_152030-00001.parquet`. This would allow the DS team to easily choose dates/times and read in that data. (I'd create a function similar to the `range` functionality, but filters parquet files between two dates.)
+
+### How should I process the data? (R/Python/)
+
+I considered these alternatives for parsing json:
+
+- Pandas
+- R: using [jsonlite](https://themockup.blog/posts/2020-05-22-parsing-json-in-r-with-jsonlite/) or [tidyjson](https://github.com/sailthru/tidyjson) packages
+- [Databricks spark](https://docs.databricks.com/data/data-sources/read-json.html)
+- [Spark json](https://spark.apache.org/docs/latest/sql-data-sources-json.html)
+- [sparklyr](https://spark.rstudio.com/reference/stream_read_json.html)
+- [dask json](https://docs.dask.org/en/latest/generated/dask.dataframe.read_json.html)
+
+Other solutions:
+  - Looked at [airbyte](https://airbyte.io/etl-tools/airflow-alternative-airbyte) and considered
+    building an airbyte [connector](https://airbyte.io/connector-development-kit)?
+
+After considering the above, and playing around with a few common imports,
+I might try dask + prefect.
+
+### How would I set up a workflow orchestrator?
+
+Prefect works great with python's dask. Airflow is fairly industry standard
+at this point. I would evaluate some of these tools for workflow and 
+data pipeline orchestration:
+
+- [Prefect](https://www.prefect.io/)
+- [MetaFlow](https://docs.metaflow.org/)
+- [Airflow](https://airflow.apache.org/)
+- [Pachyderm](https://www.pachyderm.com/)
+- [Airbyte vs. airflow](https://airbyte.io/etl-tools/airflow-alternative-airbyte)
+- [dvc](https://dvc.org/doc/api-reference): python data version control
+
+### How would I enable the data scientists to do their job better?
+
+- In-SQL ML: [mindsdb](https://mindsdb.com/) if we do the sql database
+approach, I might use airbyte to connect our sql database to mindsdb
+to do rapid automated machine learning.
+- [ML flow](https://mlflow.org/) for model experiment tracking.

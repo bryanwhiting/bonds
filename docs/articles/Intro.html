@@ -910,7 +910,7 @@ Click for more data exploration
 <span class="co">#&gt; x purrr::flatten() masks jsonlite::flatten()</span>
 <span class="co">#&gt; x dplyr::lag()     masks stats::lag()</span>
 <span class="co">#&gt; x recipes::step()  masks stats::step()</span>
-<span class="co">#&gt; • Search for functions across packages at https://www.tidymodels.org/find/</span>
+<span class="co">#&gt; • Use suppressPackageStartupMessages() to eliminate package startup messages</span>
 <span class="kw"><a href="https://rdrr.io/r/base/library.html">library</a></span><span class="op">(</span><span class="va"><a href="https://github.com/dmlc/xgboost">xgboost</a></span><span class="op">)</span>
 <span class="co">#&gt; </span>
 <span class="co">#&gt; Attaching package: 'xgboost'</span>
@@ -989,7 +989,7 @@ Click for more data exploration
 <span class="co">#&gt; Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred</span>
 <span class="co">#&gt; parsnip model object</span>
 <span class="co">#&gt; </span>
-<span class="co">#&gt; Fit time:  10ms </span>
+<span class="co">#&gt; Fit time:  12ms </span>
 <span class="co">#&gt; </span>
 <span class="co">#&gt; Call:  stats::glm(formula = pull_test_status ~ ., family = stats::binomial, </span>
 <span class="co">#&gt;     data = data)</span>
@@ -1460,11 +1460,52 @@ Click for more data exploration
 <li>Since there’s such extreme class imbalance, I may consider partitioning the data by pass/fail. This would make it easier to access the failed samples and study them more closely.</li>
 <li>Time series modeling: feature engineering across time.</li>
 </ul>
-<p>Future enhancements:</p>
+<div id="future-enhancements" class="section level3">
+<h3 class="hasAnchor">
+<a href="#future-enhancements" class="anchor"></a>Future enhancements:</h3>
 <ul>
 <li>Parallelize the data processing. I tried doing this with the sqlite database, but was having connection issues. Paaralellizing the parquet write out would not have been an issue.</li>
 <li>Since the file_ids aren’t chronological, we can update the parquet naming convention to be chronological using the start_date_time in the file_id. E.g., <code>data/pqt/12mil_CP/part-20211020_152030-00001.parquet</code>. This would allow the DS team to easily choose dates/times and read in that data. (I’d create a function similar to the <code>range</code> functionality, but filters parquet files between two dates.)</li>
 </ul>
+</div>
+<div id="how-should-i-process-the-data-rpython" class="section level3">
+<h3 class="hasAnchor">
+<a href="#how-should-i-process-the-data-rpython" class="anchor"></a>How should I process the data? (R/Python/)</h3>
+<p>I considered these alternatives for parsing json:</p>
+<ul>
+<li>Pandas</li>
+<li>R: using <a href="https://themockup.blog/posts/2020-05-22-parsing-json-in-r-with-jsonlite/">jsonlite</a> or <a href="https://github.com/sailthru/tidyjson">tidyjson</a> packages</li>
+<li><a href="https://docs.databricks.com/data/data-sources/read-json.html">Databricks spark</a></li>
+<li><a href="https://spark.apache.org/docs/latest/sql-data-sources-json.html">Spark json</a></li>
+<li><a href="https://spark.rstudio.com/reference/stream_read_json.html">sparklyr</a></li>
+<li><a href="https://docs.dask.org/en/latest/generated/dask.dataframe.read_json.html">dask json</a></li>
+</ul>
+<p>Other solutions: - Looked at <a href="https://airbyte.io/etl-tools/airflow-alternative-airbyte">airbyte</a> and considered building an airbyte <a href="https://airbyte.io/connector-development-kit">connector</a>?</p>
+<p>After considering the above, and playing around with a few common imports, I might try dask + prefect.</p>
+</div>
+<div id="how-would-i-set-up-a-workflow-orchestrator" class="section level3">
+<h3 class="hasAnchor">
+<a href="#how-would-i-set-up-a-workflow-orchestrator" class="anchor"></a>How would I set up a workflow orchestrator?</h3>
+<p>Prefect works great with python’s dask. Airflow is fairly industry standard at this point. I would evaluate some of these tools for workflow and data pipeline orchestration:</p>
+<ul>
+<li><a href="https://www.prefect.io/">Prefect</a></li>
+<li><a href="https://docs.metaflow.org/">MetaFlow</a></li>
+<li><a href="https://airflow.apache.org/">Airflow</a></li>
+<li><a href="https://www.pachyderm.com/">Pachyderm</a></li>
+<li><a href="https://airbyte.io/etl-tools/airflow-alternative-airbyte">Airbyte vs. airflow</a></li>
+<li>
+<a href="https://dvc.org/doc/api-reference">dvc</a>: python data version control</li>
+</ul>
+</div>
+<div id="how-would-i-enable-the-data-scientists-to-do-their-job-better" class="section level3">
+<h3 class="hasAnchor">
+<a href="#how-would-i-enable-the-data-scientists-to-do-their-job-better" class="anchor"></a>How would I enable the data scientists to do their job better?</h3>
+<ul>
+<li>In-SQL ML: <a href="https://mindsdb.com/">mindsdb</a> if we do the sql database approach, I might use airbyte to connect our sql database to mindsdb to do rapid automated machine learning.</li>
+<li>
+<a href="https://mlflow.org/">ML flow</a> for model experiment tracking.</li>
+</ul>
+</div>
 </div>
   </div>
 
